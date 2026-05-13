@@ -108,6 +108,26 @@ temporary directory, which will be reused later the next time ``--login``
 is given.  So you can download private profiles **non-interactively** when you
 already have a valid session cookie file.
 
+Loading Cookies from Browser
+----------------------------
+
+Instaloader can load cookies directly from your browser (instead of logging
+in with a password)::
+
+    instaloader -b firefox
+
+You must be logged into Instagram in that browser. Supported browsers:
+``brave``, ``chrome``, ``chromium``, ``edge``, ``firefox``, ``librewolf``,
+``opera``, ``opera_gx``, ``safari``, ``vivaldi``, ``helium``.
+
+To specify a custom cookie path (e.g. a specific browser profile)::
+
+    instaloader -b chrome -B /path/to/Cookies
+
+You can also load cookies from a ``cookies.txt`` file::
+
+    instaloader -B /path/to/cookies.txt
+
 `Instaloader Documentation <https://instaloader.github.io/basic-usage.html>`__
 
 Contributing
