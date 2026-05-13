@@ -937,33 +937,25 @@ class Instaloader:
 
         userid = user if isinstance(user, int) else user.userid
         try:
-            # Try iphone API first (requires sessionid, most reliable)
             data = self.context.get_iphone_json(
                 path='api/v1/highlights/{}/highlights_tray/'.format(userid), params={}
             )
             tray = data.get('tray', [])
             for hl in tray:
+                cover_img = hl.get('cover_media', {}).get('cropped_image_version', {})
                 node = {
                     'id': str(hl['id']).replace('highlight:', ''),
                     'title': hl.get('title', ''),
-                    'cover_media': {
-                        'thumbnail_src': hl.get('cover_media', {}).get(
-                            'cropped_image_version', {}
-                        ).get('url', '')
-                    },
-                    'cover_media_cropped_thumbnail': {
-                        'url': hl.get('cover_media', {}).get(
-                            'cropped_image_version', {}
-                        ).get('url', '')
-                    },
+                    'cover_media': {'thumbnail_src': cover_img.get('url', '')},
+                    'cover_media_cropped_thumbnail': {'url': cover_img.get('url', '')},
                     'owner': {
                         'id': str(userid),
                         'username': hl.get('user', {}).get('username', '')
                     },
                 }
                 yield Highlight(self.context, node, user if isinstance(user, Profile) else None)
-        except Exception:
-            # Fallback: web graphql query_id (works without sessionid for public profiles)
+        except (ConnectionException, QueryReturnedNotFoundException,
+                QueryReturnedBadRequestException, json.decoder.JSONDecodeError):
             resp = self.context._session.get(
                 'https://www.instagram.com/graphql/query/',
                 params={
@@ -982,6 +974,9 @@ class Instaloader:
                     'Accept': '*/*',
                 },
             )
+            if resp.status_code != 200:
+                raise BadResponseException('Bad highlights reel response: {} {}'.format(
+                    resp.status_code, resp.reason))
             resp_data = resp.json()
             edges = resp_data.get('data', {}).get('user', {}).get(
                 'edge_highlight_reels', {}
