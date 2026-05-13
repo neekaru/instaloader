@@ -16,12 +16,96 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 import requests
 import requests.utils
 
+import httpx
+
 from .exceptions import *
+
+
+class _Http2HeaderMsg:
+    """Mimics the httplib.HTTPMessage interface that requests' MockResponse.info() expects."""
+    def __init__(self, httpx_headers):
+        self._h = httpx_headers
+
+    def get_all(self, name, default=None):
+        values = self._h.get_list(name.lower())
+        return values if values else default
+
+    def getheaders(self, name):
+        return self._h.get_list(name.lower())
+
+
+class _Http2OriginalResponse:
+    """Mimics urllib3.HTTPResponse so that requests' extract_cookies_to_jar guard
+    (checks for _original_response.msg) passes and can read Set-Cookie headers."""
+    def __init__(self, httpx_headers):
+        self.msg = _Http2HeaderMsg(httpx_headers)
+
+
+class _Http2RawResponse:
+    """Wraps an httpx response so that requests' Session.send() can extract
+    Set-Cookie headers from it into the session's cookie jar via
+    extract_cookies_to_jar(self.cookies, request, r.raw)."""
+    def __init__(self, httpx_headers):
+        self._original_response = _Http2OriginalResponse(httpx_headers)
+        self._msg = _Http2HeaderMsg(httpx_headers)
+
+    def info(self):
+        return self._msg
+
+
+class Http2Adapter(requests.adapters.BaseAdapter):
+    """Requests transport adapter that uses httpx for HTTP/2 support.
+
+    Instagram's API endpoints (notably api/v1/users/web_profile_info/) require
+    HTTP/2 on some network configurations. Without it, these endpoints return
+    429 Too Many Requests even on the first request from a fresh IP.
+
+    Also strips empty-value placeholder cookies before sending, which can
+    confuse Instagram's CSRF/session checks."""
+
+    def __init__(self):
+        self.client = httpx.Client(http2=True, follow_redirects=True)
+
+    def send(self, request, **kwargs):
+        headers = dict(request.headers)
+        cookie_header = headers.get('Cookie', headers.get('cookie', ''))
+        if cookie_header:
+            filtered = [p.strip() for p in cookie_header.split(';')
+                        if '=' not in p or p.split('=', 1)[1].strip() != '']
+            headers['Cookie'] = '; '.join(filtered) if filtered else ''
+            if not headers['Cookie']:
+                headers.pop('Cookie', None)
+
+        r = self.client.request(
+            request.method,
+            request.url,
+            headers=headers,
+            content=request.body,
+            timeout=kwargs.get('timeout'),
+        )
+        response = requests.Response()
+        response.status_code = r.status_code
+        response._content = r.content
+        response.headers = r.headers
+        response.url = str(r.url)
+        response.request = request
+        response.raw = _Http2RawResponse(r.headers)
+        requests.cookies.extract_cookies_to_jar(response.cookies, request, response.raw)
+        return response
+
+    def close(self):
+        self.client.close()
+
+
+def _mount_http2(session: requests.Session) -> None:
+    """Mount Http2Adapter for HTTPS on a requests Session."""
+    session.mount('https://', Http2Adapter())
 
 
 def copy_session(session: requests.Session, request_timeout: Optional[float] = None) -> requests.Session:
     """Duplicates a requests.Session."""
     new = requests.Session()
+    _mount_http2(new)
     new.cookies = requests.utils.cookiejar_from_dict(requests.utils.dict_from_cookiejar(session.cookies))
     new.headers = session.headers.copy()  # type: ignore
     # Override default timeout behavior.
@@ -202,6 +286,7 @@ class InstaloaderContext:
     def get_anonymous_session(self) -> requests.Session:
         """Returns our default anonymous requests.Session object."""
         session = requests.Session()
+        _mount_http2(session)
         session.cookies.update({'sessionid': '', 'mid': '', 'ig_pr': '1',
                                 'ig_vw': '1920', 'csrftoken': '',
                                 's_network': '', 'ds_user_id': ''})
@@ -222,6 +307,7 @@ class InstaloaderContext:
     def load_session(self, username, sessiondata):
         """Not meant to be used directly, use :meth:`Instaloader.load_session`."""
         session = requests.Session()
+        _mount_http2(session)
         session.cookies = requests.utils.cookiejar_from_dict(sessiondata)
         session.headers.update(self._default_http_header())
         session.headers.update({'X-CSRFToken': session.cookies.get_dict()['csrftoken']})
@@ -266,6 +352,7 @@ class InstaloaderContext:
         # pylint:disable=protected-access
         http.client._MAXHEADERS = 200
         session = requests.Session()
+        _mount_http2(session)
         session.cookies.update({'sessionid': '', 'mid': '', 'ig_pr': '1',
                                 'ig_vw': '1920', 'ig_cb': '1', 'csrftoken': '',
                                 's_network': '', 'ds_user_id': ''})
