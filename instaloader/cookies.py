@@ -83,7 +83,7 @@ def _chromium_browser_paths() -> Dict[str, List[str]]:
             'edge': [os.path.join(config, 'microsoft-edge')],
             'opera': [os.path.join(config, 'opera')],
             'vivaldi': [os.path.join(config, 'vivaldi')],
-            'helium': [os.path.expanduser('~/.config/net.imput.helium')],
+            'helium': [os.path.join(config, 'net.imput.helium')],
         }
 
 
