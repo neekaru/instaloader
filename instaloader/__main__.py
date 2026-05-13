@@ -15,11 +15,7 @@ from . import (AbortDownloadException, BadCredentialsException, Instaloader, Ins
 from .instaloader import (get_default_session_filename, get_default_stamps_filename)
 from .instaloadercontext import default_user_agent
 from .lateststamps import LatestStamps
-try:
-    import browser_cookie3
-    bc3_library = True
-except ImportError:
-    bc3_library = False
+from .cookies import extract_cookies, SUPPORTED_BROWSERS
 
 
 class ExitCode(IntEnum):
@@ -82,48 +78,17 @@ def filterstr_to_filterfunc(filter_str: str, item_type: type):
     return filterfunc
 
 
-def get_cookies_from_instagram(domain: str, browser: str, cookie_file: Optional[str] = None):
-    supported_browsers = {
-        "brave": browser_cookie3.brave,
-        "chrome": browser_cookie3.chrome,
-        "chromium": browser_cookie3.chromium,
-        "edge": browser_cookie3.edge,
-        "firefox": browser_cookie3.firefox,
-        "librewolf": browser_cookie3.librewolf,
-        "opera": browser_cookie3.opera,
-        "opera_gx": browser_cookie3.opera_gx,
-        "safari": browser_cookie3.safari,
-        "vivaldi": browser_cookie3.vivaldi,
-        "helium": browser_cookie3.chromium,
-    }
-
-    if browser not in supported_browsers:
-        raise InvalidArgumentException("Loading cookies from the specified browser failed\n"
-                                       "Supported browsers are Brave, Chrome, Chromium, Edge, Firefox, LibreWolf, "
-                                       "Helium, Opera, Opera_GX, Safari and Vivaldi")
-
-    cookies = {}
-    if cookie_file is None and browser == "helium":
-        cookie_file = os.path.expanduser("~/.config/net.imput.helium/Default/Cookies")
-    browser_cookies = list(supported_browsers[browser](cookie_file=cookie_file))
-
-    for cookie in browser_cookies:
-        if domain in cookie.domain:
-            cookies[cookie.name] = cookie.value
-
-    if cookies:
-        print(f"Cookies loaded successfully from {browser}")
-    else:
-        raise LoginException(f"No cookies found for Instagram in {browser}, "
-                             f"Are you logged in successfully in {browser}?")
-
-    return cookies
-
-
 def import_session(browser: str, instaloader: Instaloader, cookiefile: Optional[str]):
-    cookie = get_cookies_from_instagram('instagram', browser, cookiefile)
-    if cookie is not None:
-        instaloader.context.update_cookies(cookie)
+    if browser not in SUPPORTED_BROWSERS:
+        raise InvalidArgumentException("Loading cookies from the specified browser failed\n"
+                                       "Supported browsers: braze, chrome, chromium, edge, firefox, "
+                                       "librewolf, opera, opera_gx, safari, vivaldi, helium")
+    try:
+        cookies = extract_cookies(browser, domain='instagram', cookie_path=cookiefile)
+    except (FileNotFoundError, ValueError) as err:
+        raise LoginException(str(err))
+    if cookies:
+        instaloader.context.update_cookies(cookies)
         username = instaloader.test_login()
         if not username:
             raise LoginException(f"Not logged in. Are you logged in successfully in {browser}?")
@@ -162,10 +127,8 @@ def _main(instaloader: Instaloader, targetlist: List[str],
         latest_stamps = LatestStamps(latest_stamps_file)
         instaloader.context.log(f"Using latest stamps from {latest_stamps_file}.")
     # load cookies if browser is not None
-    if browser and bc3_library:
+    if browser:
         import_session(browser.lower(), instaloader, cookiefile)
-    elif browser and not bc3_library:
-        raise InvalidArgumentException("browser_cookie3 library is needed to load cookies from browsers")
     # Login, if desired
     if username is not None:
         if not re.match(r"^[A-Za-z0-9._]+$", username):
