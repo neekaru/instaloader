@@ -94,14 +94,17 @@ def get_cookies_from_instagram(domain: str, browser: str, cookie_file: Optional[
         "opera_gx": browser_cookie3.opera_gx,
         "safari": browser_cookie3.safari,
         "vivaldi": browser_cookie3.vivaldi,
+        "helium": browser_cookie3.chromium,
     }
 
     if browser not in supported_browsers:
         raise InvalidArgumentException("Loading cookies from the specified browser failed\n"
                                        "Supported browsers are Brave, Chrome, Chromium, Edge, Firefox, LibreWolf, "
-                                       "Opera, Opera_GX, Safari and Vivaldi")
+                                       "Helium, Opera, Opera_GX, Safari and Vivaldi")
 
     cookies = {}
+    if cookie_file is None and browser == "helium":
+        cookie_file = os.path.expanduser("~/.config/net.imput.helium/Default/Cookies")
     browser_cookies = list(supported_browsers[browser](cookie_file=cookie_file))
 
     for cookie in browser_cookies:
