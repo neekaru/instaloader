@@ -61,6 +61,7 @@ def _chromium_browser_paths() -> Dict[str, List[str]]:
             'edge': [os.path.join(local, R'Microsoft\Edge\User Data')],
             'opera': [os.path.join(roaming, R'Opera Software\Opera Stable')],
             'vivaldi': [os.path.join(local, R'Vivaldi\User Data')],
+            'helium': [os.path.join(local, R'Helium\User Data')],
         }
     elif _is_macos():
         appdata = os.path.expanduser('~/Library/Application Support')
@@ -71,6 +72,7 @@ def _chromium_browser_paths() -> Dict[str, List[str]]:
             'edge': [os.path.join(appdata, 'Microsoft Edge')],
             'opera': [os.path.join(appdata, 'com.operasoftware.Opera')],
             'vivaldi': [os.path.join(appdata, 'Vivaldi')],
+            'helium': [os.path.join(appdata, 'Helium')],
         }
     else:
         config = _config_home()
@@ -81,15 +83,8 @@ def _chromium_browser_paths() -> Dict[str, List[str]]:
             'edge': [os.path.join(config, 'microsoft-edge')],
             'opera': [os.path.join(config, 'opera')],
             'vivaldi': [os.path.join(config, 'vivaldi')],
+            'helium': [os.path.expanduser('~/.config/net.imput.helium')],
         }
-
-
-def _helium_paths() -> List[str]:
-    if _is_windows():
-        return [os.path.expandvars(R'%LOCALAPPDATA%\Helium\User Data')]
-    elif _is_macos():
-        return [os.path.expanduser('~/Library/Application Support/Helium')]
-    return [os.path.expanduser('~/.config/net.imput.helium')]
 
 
 def _find_cookie_db(root: str) -> Optional[str]:
@@ -226,8 +221,6 @@ def _extract_chrome_cookies(browser: str, cookie_path: Optional[str] = None,
         db_path = cookie_path
     else:
         paths = _chromium_browser_paths().get(browser, [])
-        if browser == 'helium':
-            paths = _helium_paths()
         db_path = None
         for root in paths:
             if os.path.exists(root):
