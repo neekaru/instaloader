@@ -912,11 +912,25 @@ class Profile:
         """
         data = context.doc_id_graphql_query("26347858941511777", {"hasQuery": True, "query": username})["data"]
         if data:
-            for user in data["xdt_api__v1__fbsearch__non_profiled_serp"]["users"]:
+            for user in data.get("xdt_api__v1__fbsearch__non_profiled_serp", {}).get("users", []):
                 if user["username"].lower() == username.lower():
                     return cls(context, user)
 
-        raise ProfileNotExistsException("Profile {} does not exist.".format(username))
+        url = 'https://www.instagram.com/api/v1/users/web_profile_info/?username={}'.format(username)
+        headers = {
+            'X-IG-App-ID': '936619743392459',
+            'X-ASBD-ID': '198387',
+            'User-Agent': context.user_agent,
+            'Referer': 'https://www.instagram.com/{}/'.format(username),
+        }
+        resp = context._session.get(url, headers=headers, timeout=context.request_timeout)
+        if resp.status_code == 404:
+            raise ProfileNotExistsException("Profile {} does not exist.".format(username))
+        resp.raise_for_status()
+        user = (resp.json().get("data") or {}).get("user")
+        if not user:
+            raise ProfileNotExistsException("Profile {} does not exist.".format(username))
+        return cls(context, user)
 
     @classmethod
     def from_id(cls, context: InstaloaderContext, profile_id: int):
