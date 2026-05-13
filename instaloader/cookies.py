@@ -1,13 +1,15 @@
-"""Native browser cookie extraction for Chromium-based browsers and Firefox.
+"""Native browser cookie extraction for Chromium-based browsers, Firefox, and Safari.
 
 Supports:
 - Chromium-based: Brave, Chrome, Chromium, Edge, Opera, Vivaldi, Helium
 - Firefox
+- Safari (macOS binary cookie format)
 - cookies.txt (Netscape format)
 
 Encrypted Chromium cookies (v10/v11) are decrypted using:
 - AES-CBC with PBKDF2-derived key (via pyaes)
-- OS keyring (secretstorage / KWallet) for v11 key
+- Linux: secretstorage / KWallet for v11 key
+- macOS: security CLI (Keychain) for v10/v11 key
 """
 
 import base64
@@ -17,23 +19,39 @@ import os
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from glob import glob
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-# ── Browser paths ──────────────────────────────────────────────────────
+# ── Platform helpers ────────────────────────────────────────────────────
 
 def _config_home() -> str:
     return os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
 
 
+def _is_macos() -> bool:
+    return sys.platform == 'darwin'
+
+
+def _is_linux() -> bool:
+    return sys.platform.startswith('linux')
+
+
+def _is_windows() -> bool:
+    return sys.platform in ('win32', 'cygwin')
+
+
+# ── Browser paths ──────────────────────────────────────────────────────
+
 def _chromium_browser_paths() -> Dict[str, List[str]]:
-    if sys.platform in ('win32', 'cygwin'):
+    if _is_windows():
         local = os.path.expandvars('%LOCALAPPDATA%')
         roaming = os.path.expandvars('%APPDATA%')
         return {
@@ -44,7 +62,7 @@ def _chromium_browser_paths() -> Dict[str, List[str]]:
             'opera': [os.path.join(roaming, R'Opera Software\Opera Stable')],
             'vivaldi': [os.path.join(local, R'Vivaldi\User Data')],
         }
-    elif sys.platform == 'darwin':
+    elif _is_macos():
         appdata = os.path.expanduser('~/Library/Application Support')
         return {
             'brave': [os.path.join(appdata, 'BraveSoftware/Brave-Browser')],
@@ -66,8 +84,15 @@ def _chromium_browser_paths() -> Dict[str, List[str]]:
         }
 
 
+def _helium_paths() -> List[str]:
+    if _is_windows():
+        return [os.path.expandvars(R'%LOCALAPPDATA%\Helium\User Data')]
+    elif _is_macos():
+        return [os.path.expanduser('~/Library/Application Support/Helium')]
+    return [os.path.expanduser('~/.config/net.imput.helium')]
+
+
 def _find_cookie_db(root: str) -> Optional[str]:
-    """Walk Chromium profile dirs to find Cookies database."""
     for dirpath, dirnames, files in os.walk(root):
         if 'Cookies' in files:
             return os.path.join(dirpath, 'Cookies')
@@ -78,24 +103,41 @@ def _find_cookie_db(root: str) -> Optional[str]:
     return None
 
 
-# ── AES-CBC decryption ────────────────────────────────────────────────
+# ── AES-CBC ────────────────────────────────────────────────────────────
 
 def _aes_cbc_decrypt(ciphertext: bytes, key: bytes, iv: bytes) -> bytes:
     import pyaes
     dec = pyaes.Decrypter(pyaes.AESModeOfOperationCBC(key, iv))
-    plaintext = dec.feed(ciphertext) + dec.feed()
-    return plaintext
+    return dec.feed(ciphertext) + dec.feed()
 
 
-def _get_v10_key() -> bytes:
-    return hashlib.pbkdf2_hmac('sha1', b'peanuts', b'saltysalt', 1, 16)
-
-
-def _get_empty_key() -> bytes:
-    return hashlib.pbkdf2_hmac('sha1', b'', b'saltysalt', 1, 16)
+def _pbkdf2(password: bytes, iterations: int = 1) -> bytes:
+    return hashlib.pbkdf2_hmac('sha1', password, b'saltysalt', iterations, 16)
 
 
 def _get_keyring_key() -> Optional[bytes]:
+    if _is_macos():
+        return _get_macos_keyring_key()
+    return _get_linux_keyring_key()
+
+
+def _get_macos_keyring_key() -> Optional[bytes]:
+    for name in ('Chromium', 'Chrome', 'Brave', 'Helium'):
+        try:
+            result = subprocess.run(
+                ['security', 'find-generic-password', '-w',
+                 '-a', name, '-s', f'{name} Safe Storage'],
+                capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return result.stdout.rstrip('\n').encode()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+    return None
+
+
+def _get_linux_keyring_key() -> Optional[bytes]:
     for name in ('Chromium', 'Chrome', 'Brave', 'Helium'):
         try:
             import secretstorage
@@ -128,15 +170,7 @@ def _get_keyring_key() -> Optional[bytes]:
     return None
 
 
-def _make_v11_key(keyring_secret: bytes) -> Optional[bytes]:
-    """Derive AES key from keyring secret.
-
-    Chromium v11 on Linux: keyring stores a base64-encoded blob.
-    The AES key is PBKDF2-HMAC-SHA1(keyring_secret, 'saltysalt', 1, 16)
-    where keyring_secret is the raw bytes from keyring (ASCII base64 string).
-    """
-    return hashlib.pbkdf2_hmac('sha1', keyring_secret, b'saltysalt', 1, 16)
-
+# ── Chrome cookie decryption ───────────────────────────────────────────
 
 def _decrypt_chrome_value(encrypted_value: bytes) -> Optional[str]:
     if not encrypted_value:
@@ -157,21 +191,23 @@ def _decrypt_chrome_value(encrypted_value: bytes) -> Optional[str]:
     if len(ciphertext) < 16 or len(ciphertext) % 16 != 0:
         return None
 
-    keys_to_try = [(_get_v10_key(), 'v10')]
+    kr_key = _get_keyring_key() if version == b'v11' else None
 
-    if version == b'v11':
-        kr_key = _get_keyring_key()
-        if kr_key:
-            v11_key = _make_v11_key(kr_key)
-            if v11_key:
-                keys_to_try.insert(0, (v11_key, 'v11'))
+    if kr_key:
+        keys_to_try = [
+            (_pbkdf2(kr_key, 1003 if _is_macos() else 1), 'v11'),
+            (_pbkdf2(b'peanuts'), 'v10'),
+            (_pbkdf2(b''), 'empty'),
+        ]
+    else:
+        keys_to_try = [
+            (_pbkdf2(b'peanuts'), 'v10'),
+            (_pbkdf2(b''), 'empty'),
+        ]
 
-    keys_to_try.append((_get_empty_key(), 'empty'))
-
-    for key, label in keys_to_try:
+    for key, _label in keys_to_try:
         try:
             pt = _aes_cbc_decrypt(ciphertext, key, iv)
-            # Chromium >= schema version 24 prepends a 16-byte HMAC-SHA256 hash
             val = pt[16:] if len(pt) > 16 else pt
             decoded = val.decode('utf-8')
             if decoded:
@@ -191,7 +227,7 @@ def _extract_chrome_cookies(browser: str, cookie_path: Optional[str] = None,
     else:
         paths = _chromium_browser_paths().get(browser, [])
         if browser == 'helium':
-            paths = [os.path.expanduser('~/.config/net.imput.helium')]
+            paths = _helium_paths()
         db_path = None
         for root in paths:
             if os.path.exists(root):
@@ -201,11 +237,6 @@ def _extract_chrome_cookies(browser: str, cookie_path: Optional[str] = None,
 
     if not db_path or not os.path.exists(db_path):
         raise FileNotFoundError(f'Could not find Cookies database for {browser}')
-
-    hardcoded_paths = {
-        'helium': os.path.expanduser('~/.config/net.imput.helium'),
-    }
-    browser_dir = db_path.replace('/Cookies', '').replace('/Default/Cookies', '')
 
     with tempfile.TemporaryDirectory(prefix='instaloader_') as tmpdir:
         copy_path = os.path.join(tmpdir, 'Cookies')
@@ -241,9 +272,9 @@ def _extract_chrome_cookies(browser: str, cookie_path: Optional[str] = None,
 # ── Firefox extraction ─────────────────────────────────────────────────
 
 def _firefox_dirs() -> List[str]:
-    if sys.platform in ('cygwin', 'win32'):
+    if _is_windows():
         return [os.path.expandvars(R'%APPDATA%\Mozilla\Firefox\Profiles')]
-    elif sys.platform == 'darwin':
+    elif _is_macos():
         return [os.path.expanduser('~/Library/Application Support/Firefox/Profiles')]
     return [
         os.path.join(_config_home(), 'mozilla/firefox'),
@@ -284,6 +315,89 @@ def _extract_firefox_cookies(profile_path: Optional[str] = None,
         return cookies
 
 
+# ── Safari extraction (macOS binary cookies) ───────────────────────────
+
+def _safari_cookie_paths() -> List[str]:
+    return [
+        os.path.expanduser('~/Library/Cookies/Cookies.binarycookies'),
+        os.path.expanduser('~/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies'),
+    ]
+
+
+def _parse_safari_cookies(data: bytes) -> Dict[str, str]:
+    """Parse Safari binary cookie format (Cookies.binarycookies).
+
+    Reference: https://github.com/libyal/dtformats/blob/main/documentation/Safari%20Cookies.asciidoc
+    """
+    cookies: Dict[str, str] = {}
+    offset = 0
+
+    if data[offset:offset + 4] != b'cook':
+        raise ValueError('Not a Safari cookies file')
+    offset += 4
+
+    num_pages = struct.unpack_from('>I', data, offset)[0]
+    offset += 4
+    page_sizes = [struct.unpack_from('>I', data, offset + i * 4)[0] for i in range(num_pages)]
+    offset += num_pages * 4
+
+    for page_size in page_sizes:
+        page = data[offset:offset + page_size]
+        offset += page_size
+
+        if page[:4] != b'\x00\x00\x01\x00':
+            continue
+
+        num_cookies = struct.unpack_from('<I', page, 4)[0]
+        record_offsets = [struct.unpack_from('<I', page, 8 + i * 4)[0] for i in range(num_cookies)]
+        if not record_offsets:
+            continue
+
+        for rec_off in record_offsets:
+            if rec_off + 4 > len(page):
+                continue
+            rec_size = struct.unpack_from('<I', page, rec_off)[0]
+            if rec_off + rec_size > len(page):
+                continue
+            rec = page[rec_off:rec_off + rec_size]
+
+            flags = struct.unpack_from('<I', rec, 8)[0]
+            is_secure = bool(flags & 0x0001)
+            domain_off = struct.unpack_from('<I', rec, 16)[0]
+            name_off = struct.unpack_from('<I', rec, 20)[0]
+            path_off = struct.unpack_from('<I', rec, 24)[0]
+            value_off = struct.unpack_from('<I', rec, 28)[0]
+
+            def read_str(start):
+                end = rec.index(b'\x00', start) if b'\x00' in rec[start:] else len(rec)
+                return rec[start:end].decode('utf-8', errors='replace')
+
+            try:
+                domain = read_str(domain_off)
+                name = read_str(name_off)
+                path = read_str(path_off)
+                value = read_str(value_off)
+                cookies[name] = value
+            except (ValueError, IndexError):
+                continue
+
+    return cookies
+
+
+def _extract_safari_cookies(domain_filter: Optional[str] = None) -> Dict[str, str]:
+    for path in _safari_cookie_paths():
+        if os.path.isfile(path):
+            with open(path, 'rb') as f:
+                data = f.read()
+            cookies = _parse_safari_cookies(data)
+            if domain_filter:
+                cookies = {k: v for k, v in cookies.items()
+                          if domain_filter in str(k)}
+            if cookies:
+                return cookies
+    return {}
+
+
 # ── cookies.txt (Netscape format) ───────────────────────────────────────
 
 def _parse_netscape_cookies(filepath: str) -> Dict[str, str]:
@@ -317,10 +431,14 @@ def extract_cookies(browser: str, domain: str = 'instagram',
         cookies = _parse_netscape_cookies(cookie_path)
         return {k: v for k, v in cookies.items() if domain in str(k)}
 
-    if browser == 'firefox':
-        cookies = _extract_firefox_cookies(profile or cookie_path, domain)
-    elif browser in ('brave', 'chrome', 'chromium', 'edge', 'opera', 'vivaldi', 'helium'):
+    if browser in ('brave', 'chrome', 'chromium', 'edge', 'opera', 'vivaldi', 'helium'):
         cookies = _extract_chrome_cookies(browser, cookie_path, domain)
+    elif browser == 'firefox':
+        cookies = _extract_firefox_cookies(profile or cookie_path, domain)
+    elif browser in ('safari',):
+        if not _is_macos():
+            raise ValueError('Safari is only supported on macOS')
+        cookies = _extract_safari_cookies(domain)
     else:
         raise ValueError(f'Unsupported browser: {browser}')
 
