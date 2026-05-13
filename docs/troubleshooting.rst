@@ -90,3 +90,26 @@ This script also supports specifying a cookie file path, which may be useful if
 you use multiple Firefox profiles or if your operating system has the directory
 structure differently set up. Also, you can specify an alternative session file
 path.
+
+Loading Cookies from Browsers
+-----------------------------
+
+Instaloader can load Instagram session cookies directly from your browser
+(Chrome, Firefox, Edge, Brave, Opera, Vivaldi, Helium, Safari).
+
+Usage::
+
+   instaloader -b BROWSER_NAME
+
+Supported browsers: ``brave``, ``chrome``, ``chromium``, ``edge``, ``firefox``,
+``librewolf``, ``opera``, ``opera_gx``, ``safari``, ``vivaldi``, ``helium``.
+
+You must be logged into Instagram in that browser for this to work.
+
+If you use multiple browser profiles, specify the cookie database path::
+
+   instaloader -b BROWSER_NAME -B /path/to/Cookies
+
+You can also load cookies from a cookies.txt (Netscape format) file::
+
+   instaloader -B /path/to/cookies.txt
