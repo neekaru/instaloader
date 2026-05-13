@@ -1,8 +1,0 @@
-requests>=2.25
-httpx[http2]>=0.27.0
-
-[browser_cookie3]
-browser_cookie3>=0.19.1
-
-[cookies]
-pyaes>=1.6.1
