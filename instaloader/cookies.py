@@ -131,20 +131,11 @@ def _get_keyring_key() -> Optional[bytes]:
 def _make_v11_key(keyring_secret: bytes) -> Optional[bytes]:
     """Derive AES key from keyring secret.
 
-    Chromium v11 on Linux: keyring stores base64-encoded 16-byte AES key (direct).
-    Some versions store a password that needs PBKDF2 derivation.
-    Try both.
+    Chromium v11 on Linux: keyring stores a base64-encoded blob.
+    The AES key is PBKDF2-HMAC-SHA1(keyring_secret, 'saltysalt', 1, 16)
+    where keyring_secret is the raw bytes from keyring (ASCII base64 string).
     """
-    if len(keyring_secret) == 16:
-        return keyring_secret
-    try:
-        decoded = base64.b64decode(keyring_secret)
-        if len(decoded) == 16:
-            return decoded
-    except Exception:
-        pass
-    derived = hashlib.pbkdf2_hmac('sha1', keyring_secret, b'saltysalt', 1, 16)
-    return derived
+    return hashlib.pbkdf2_hmac('sha1', keyring_secret, b'saltysalt', 1, 16)
 
 
 def _decrypt_chrome_value(encrypted_value: bytes) -> Optional[str]:
@@ -180,11 +171,11 @@ def _decrypt_chrome_value(encrypted_value: bytes) -> Optional[str]:
     for key, label in keys_to_try:
         try:
             pt = _aes_cbc_decrypt(ciphertext, key, iv)
-            val = pt.decode('utf-8')
-            if val:
-                return val
-            if label == 'v11':
-                return val
+            # Chromium >= schema version 24 prepends a 16-byte HMAC-SHA256 hash
+            val = pt[16:] if len(pt) > 16 else pt
+            decoded = val.decode('utf-8')
+            if decoded:
+                return decoded
         except Exception:
             continue
 
